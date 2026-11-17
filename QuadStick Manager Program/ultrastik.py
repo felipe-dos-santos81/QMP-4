@@ -1,5 +1,5 @@
 from time import sleep
-from pywinusb import hid
+import hidcompat as hid
 from qsflash import settings
 import math
 

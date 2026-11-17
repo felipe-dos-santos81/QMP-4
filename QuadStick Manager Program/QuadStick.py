@@ -65,6 +65,12 @@ from mouse import *
 from googledrive import *
 from textstrings import *
 
+if sys.platform == 'darwin':
+    # Python on macOS has no certificate store of its own.  Without this, https downloads only
+    # work on a Mac that happens to have the same OpenSSL install as the one QMP was built on.
+    import certifi
+    os.environ.setdefault('SSL_CERT_FILE', certifi.where())
+
 DEBUG = False
 settings = qsflash.settings
 preferences = qsflash.preferences
@@ -113,6 +119,19 @@ def resource_path(relative_path):
 
     return os.path.join(base_path, relative_path)
     
+def portable_append(append):
+    """AppendText for the message panes off Windows.
+
+    Safe to call from any thread, as the serial, voice and USB code does, and without the
+    "\r\n" line ends used throughout, which show as two line breaks in a macOS text box."""
+    def append_text(text):
+        text = text.replace("\r\n", "\n")
+        if wx.IsMainThread():
+            append(text)
+        else:
+            wx.CallAfter(append, text)
+    return append_text
+
 # Define Text Drop Target class
 
 def create_menu_item(menu, label, func):
@@ -332,8 +351,9 @@ class MouseCapture(wx.Dialog):
     def __set_properties(self, event):  # wxGlade: MouseCapture.<event_handler>
         self.SetSize((wx.DisplaySize()[0], wx.DisplaySize()[1]))
         self.SetWindowStyle(wx.STAY_ON_TOP) # go borderless
-        self.SetExtraStyle(self.GetExtraStyle() & ~(win32con.WS_EX_DLGMODALFRAME |
-           win32con.WS_EX_WINDOWEDGE | win32con.WS_EX_CLIENTEDGE | win32con.WS_EX_STATICEDGE))
+        if sys.platform == 'win32':
+            self.SetExtraStyle(self.GetExtraStyle() & ~(win32con.WS_EX_DLGMODALFRAME |
+               win32con.WS_EX_WINDOWEDGE | win32con.WS_EX_CLIENTEDGE | win32con.WS_EX_STATICEDGE))
         self.SetRect((0,0,wx.DisplaySize()[0], wx.DisplaySize()[1]))
         event.Skip()
 # end of class MouseCapture
@@ -1341,6 +1361,9 @@ class QuadStickPreferences(wx.Frame):
         self.Bind(wx.EVT_BUTTON, self.ReloadFromQuadstick, self.button_reload)
         # end wxGlade
         self.Bind(wx.EVT_CLOSE, self.CloseEvent, self)
+        if sys.platform != 'win32':
+            for pane in (self.text_ctrl_messages, self.voice_transcript):
+                pane.AppendText = portable_append(pane.AppendText)
         self.tbIcon = CustomTaskBarIcon(self)
         self.Bind(wx.EVT_ICONIZE, self.onMinimize, self)
         self.voice_transcript.Bind(wx.EVT_KEY_DOWN, self.KeyDownEvent, self.voice_transcript)
@@ -1674,7 +1697,7 @@ class QuadStickPreferences(wx.Frame):
             self.text_ctrl_messages.AppendText("QuadStick flash drive not found.\n")
             #self.button_reload.Disable()
         else:
-            self.text_ctrl_messages.AppendText("QuadStick drive letter: " + d[:2] + "\n")
+            self.text_ctrl_messages.AppendText(("QuadStick drive letter: " + d[:2] if sys.platform == 'win32' else "QuadStick drive: " + d) + "\n")
         if load_preferences_file(self) is not None:  # try both flash and ssp access to prefs files
             # update status box
             self.text_ctrl_messages.AppendText("Loaded preferences OK\n")
@@ -1859,7 +1882,8 @@ class QuadStickPreferences(wx.Frame):
             self.list_ctrl_firmware.InsertColumn(0, "build")
             self.list_ctrl_firmware.InsertColumn(1, "remark")
         if build_number is None or build_number < 1215:
-            preferences["enable_DS3_emulation"] = "0" # make sure DS4 mode off
+            if build_number is not None:  # build unknown: keep the setting the QuadStick has
+                preferences["enable_DS3_emulation"] = "0" # make sure DS4 mode off
             self.checkbox_ps4_boot_mode.Disable()
         else:
             self.checkbox_ps4_boot_mode.Enable()
@@ -1923,6 +1947,7 @@ class QuadStickPreferences(wx.Frame):
                                 print("DeleteFromQuadStickEvent exception: ", repr(e))
                                 self.text_ctrl_messages.AppendText("Exception while removing: " + filename + "\n")
                         selection = self.list_box_csv_files.GetNextSelected(selection)
+                    flush_quadstick_drive()
             self.update_quadstick_flash_files_items()
         except Exception as e:
             print("Exception during DeleteFromQuadStickEvent")
@@ -1936,20 +1961,26 @@ class QuadStickPreferences(wx.Frame):
         print("Event handler 'ScanGoogleGameProfilesEvent'")
         # (game_name, folder, path, name))
         #self.online_game_files_list.ClearAll()
+        self.SetCursor(wx.Cursor(wx.CURSOR_WAIT))
         t = threading.Thread(target=self._ScanGoogleGameProfilesEvent) #, args=(self,))
         t.daemon = True
         t.start()
         #self._ScanGoogleGameProfilesEvent()
         #event.Skip()
 
-    def _ScanGoogleGameProfilesEvent(self):
+    def _ScanGoogleGameProfilesEvent(self):  # worker thread: download only, widgets belong to the GUI thread
         try:
-            self.SetCursor(wx.Cursor(wx.CURSOR_WAIT))
             import time
             t1 = time.time()
             games, voices = get_factory_game_and_voice_files()  # get csv and vch/vcl file info from Google
             t2 = time.time()
             print("#####  TIME TO GET GAME PROFILES #### ", t2 - t1)
+            wx.CallAfter(self._show_game_profiles, games, voices)
+        except Exception as e:
+            print("_ScanGoogleGameProfilesEvent exception: ", repr(e))
+
+    def _show_game_profiles(self, games, voices):
+        try:
             self.SetCursor(wx.Cursor(wx.CURSOR_DEFAULT))
             #self._game_profiles = [fn for fn in files if (fn[3].find(".csv") > 0)]
             self._game_profiles = games
@@ -1981,6 +2012,8 @@ class QuadStickPreferences(wx.Frame):
         self.online_game_files_list.SetColumnWidth(1, wx.LIST_AUTOSIZE_USEHEADER) # resize column to match new items
 
     def update_online_voice_files_list_items(self): # updates the display widget with the current voice list
+        if not self.online_voice_files_list.GetColumnCount():
+            return  # the columns are only set up when Vocola is installed
         self.online_voice_files_list.DeleteAllItems()
         index = 0
         for f in self._voice_files:
@@ -2300,7 +2333,6 @@ class QuadStickPreferences(wx.Frame):
         global QS
         import shutil
         import tempfile
-        import win32file
         from zipfile import ZipFile
         print("Event handler 'DownloadFirmwareEvent'")
         item = self.list_ctrl_firmware.GetFirstSelected()
@@ -2316,15 +2348,15 @@ class QuadStickPreferences(wx.Frame):
             self.text_ctrl_messages.AppendText("Download new firmware file.  Please wait...\n")
             firmware_image_zip = get_google_drive_file_by_id(self._builds[item]["id"])
             # save contents of quadstick
-            tmp_folder_path = tempfile.gettempdir() + '\\quad_stick_temporary_files'
+            tmp_folder_path = os.path.join(tempfile.gettempdir(), 'quad_stick_temporary_files')
             shutil.rmtree(tmp_folder_path, True)
             tmp_folder = os.mkdir(tmp_folder_path)
             # write zip file to temp folder and unzip it
-            with open(tmp_folder_path + "\\Joystick.zip", "wb", 0) as zipFile:
+            with open(os.path.join(tmp_folder_path, "Joystick.zip"), "wb", 0) as zipFile:
                 zipFile.write(firmware_image_zip)
                 zipFile.flush()
             # unzip file 
-            with ZipFile(tmp_folder_path + "\\Joystick.zip", "r", 0) as zipFile:
+            with ZipFile(os.path.join(tmp_folder_path, "Joystick.zip"), "r", 0) as zipFile:
                 firmware_image = zipFile.read("Joystick.bin")
             # get quadstick folder
             qs = find_quadstick_drive()
@@ -2340,17 +2372,25 @@ class QuadStickPreferences(wx.Frame):
             except Exception as e:
                 print(repr(e))
             for file in csv_file_list:
-                shutil.copyfile(qs + file[0], tmp_folder_path + "\\" + file[0])
+                shutil.copyfile(qs + file[0], os.path.join(tmp_folder_path, file[0]))
                 self.text_ctrl_messages.AppendText(" " + file[0] + "\n")
                 wx.Yield()
             self.text_ctrl_messages.AppendText("CSV files backed up to: " + tmp_folder_path + "\n")
             self.text_ctrl_messages.AppendText("Write new firmware file to QuadStick\n")
-            handle = win32file.CreateFile(qs + "Joystick.tmp", win32file.GENERIC_WRITE , 0 , None, win32file.CREATE_ALWAYS , win32file.FILE_FLAG_WRITE_THROUGH , None )
-            print("file handle: ", handle)
             print("image size: ", len(firmware_image))
-            win32file.WriteFile(handle, firmware_image)
-            win32file.FlushFileBuffers(handle)
-            win32file.CloseHandle(handle)
+            if sys.platform == 'win32':
+                import win32file
+                handle = win32file.CreateFile(qs + "Joystick.tmp", win32file.GENERIC_WRITE , 0 , None, win32file.CREATE_ALWAYS , win32file.FILE_FLAG_WRITE_THROUGH , None )
+                print("file handle: ", handle)
+                win32file.WriteFile(handle, firmware_image)
+                win32file.FlushFileBuffers(handle)
+                win32file.CloseHandle(handle)
+            else:
+                with open(qs + "Joystick.tmp", 'wb') as fwfile:
+                    fwfile.write(firmware_image)
+                    fwfile.flush()
+                    os.fsync(fwfile.fileno())
+                flush_quadstick_drive()
             # with open(qs + "Joystick.tmp", 'wb', 0) as fwfile:
                 # # write header
                 # fwfile.write(firmware_image)
@@ -2362,6 +2402,7 @@ class QuadStickPreferences(wx.Frame):
             except:
                 pass
             os.rename(qs + "Joystick.tmp",qs + "Joystick.bin")
+            flush_quadstick_drive()
             #del(fwfile)
             self.text_ctrl_messages.AppendText("Wait for QuadStick to reboot...\n")
             wx.Yield()
@@ -2380,7 +2421,7 @@ class QuadStickPreferences(wx.Frame):
                 self.text_ctrl_messages.AppendText("\nQuadStick rebooting\n")
             else:
                 self.text_ctrl_messages.AppendText("\nQuadStick reboot not detected\n")
-                wx.MessageBox("The QuadStick did not automatically reboot!\n\nIn Windows Explorer 'Eject' the QuadStick drive.\nIf QuadStick does not restart in ten seconds,\nunplug it and plug it back in\nthen click OK", 'Error', wx.OK | wx.ICON_ERROR)
+                wx.MessageBox("The QuadStick did not automatically reboot!\n\nIn " + ("Windows Explorer" if sys.platform == 'win32' else "Finder") + " 'Eject' the QuadStick drive.\nIf QuadStick does not restart in ten seconds,\nunplug it and plug it back in\nthen click OK", 'Error', wx.OK | wx.ICON_ERROR)
             self.text_ctrl_messages.AppendText("Waiting for QuadStick to install new firmware...\n")
             for i in range(5):
                 for sec in range(60):
@@ -2395,9 +2436,10 @@ class QuadStickPreferences(wx.Frame):
                     self.text_ctrl_messages.AppendText("\nCopy files back\n")
                     sleep(4)
                     for file in csv_file_list:
-                        shutil.copyfile(tmp_folder_path + "\\" + file[0], qs + file[0])
+                        shutil.copyfile(os.path.join(tmp_folder_path, file[0]), qs + file[0])
                         self.text_ctrl_messages.AppendText(" " + file[0] + "\n")
                         wx.Yield()
+                    flush_quadstick_drive()
                     self.text_ctrl_messages.AppendText("Done!\n")
                     
                     # reopen game controller interface
@@ -2843,7 +2885,7 @@ class QuadStickPreferences(wx.Frame):
         if dlg.ShowModal() == wx.ID_YES:
             self.text_ctrl_messages.AppendText("Sending Debug report.  Please wait...\r\n")
             try:
-                telemetry_log('systeminfo&' + urllib.parse.quote_plus(subprocess.check_output("systeminfo")))
+                telemetry_log('systeminfo&' + urllib.parse.quote_plus(subprocess.check_output("systeminfo" if sys.platform == 'win32' else "sw_vers")))
             except Exception as e:
                 print("systeminfo error", repr(e))
             sleep(4.0)
@@ -2898,8 +2940,8 @@ class QuadStickPreferences(wx.Frame):
         xlsx2csv.write_temporary_file("blue.svg", BLUE_DOT, False)
         xlsx2csv.write_temporary_file("purple.svg", PURPLE_DOT, False)
         xlsx2csv.write_temporary_file("grey.svg", GREY_DOT, False)
-        import webbrowser
-        url = """file:///""" + tmp_file_path
+        import webbrowser, pathlib
+        url = pathlib.Path(tmp_file_path).as_uri()
         webbrowser.open(url, new=2)
         event.Skip()
     def PS4BootModeEvent(self, event):  # wxGlade: QuadStickPreferences.<event_handler>
@@ -3048,6 +3090,16 @@ class QuadStickPreferences(wx.Frame):
 # end of class QuadStickPreferences
 
 
+class QMPApp(wx.App):
+    def MacOpenFiles(self, filenames):
+        # macOS hands over a .qmp file opened from Finder here; Windows puts it in sys.argv
+        for filename in filenames:
+            if filename.find(".qmp") > 0:
+                with open(filename, 'rb') as qmp_file:
+                    qmp_url = qmp_file.readline().decode()
+                # this can arrive before the main window exists, so look QMP up when the event runs
+                wx.CallAfter(lambda url=qmp_url: QMP.csv_files_dropped(None, None, url))
+
 def main():
     import tempfile
     global QMP
@@ -3068,9 +3120,11 @@ def main():
     # redirect stdout to file when running under pythonw, if you don't
     # eventually the program stops working with no indication as to why
     print(str(sys.executable))
-    tmp_log_path = tempfile.gettempdir() + '\\quad_stick_log_file.txt'
-    if sys.executable.find('python.exe') == -1:
-        logfile = open(tmp_log_path, 'wt')
+    tmp_log_path = os.path.join(tempfile.gettempdir(), 'quad_stick_log_file.txt')
+    # off Windows only the built app is redirected, so output stays in the terminal during development
+    if sys.executable.find('python.exe') == -1 and (sys.platform == 'win32' or getattr(sys, 'frozen', False)):
+        # macOS quits the app without giving Python the chance to flush, so write the log line by line there
+        logfile = open(tmp_log_path, 'wt', 1 if sys.platform == 'darwin' else -1)
         sys.stdout = sys.stderr = logfile
         print(repr(logfile))
     print(str(sys.executable))
@@ -3090,7 +3144,8 @@ def main():
     # load_preferences_file()
     
     gettext.install("app") # part of wxPython internationalization. replace with the appropriate catalog name for different languages
-    app = wx.App(0)
+    app = QMPApp(0)
+    wx.Log.SetLogLevel(wx.LOG_Info)  # newer wxWidgets logs a debug line per widget at start up, which bloats the debug report
     wx.InitAllImageHandlers()
     QMP = QuadStickPreferences(None, wx.ID_ANY, "")
     QMP.console_type = ""
@@ -3152,7 +3207,7 @@ def main():
             except Exception as e:
                 print(repr(e))
                 settings['ViGEmBus'] = str(e)
-                QMP.text_ctrl_messages.AppendText('ViGEmBus driver not present\r\n')
+                QMP.text_ctrl_messages.AppendText('ViGEmBus driver not present\r\n' if sys.platform == 'win32' else 'Virtual gamepad emulation is only available on Windows\r\n')
                 QMP.checkbox_enable_vg_X360.Disable()
                 QMP.checkbox_enable_vg_DS4.Disable()
             try:

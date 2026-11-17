@@ -1,9 +1,13 @@
 ## Quadstick flash drive related functions
 
 import os
-import win32api
+import sys
 import csv
+import plistlib
+import subprocess
 import wx
+if sys.platform == 'win32':
+    import win32api
 
 preferences = {}
 defaults = {
@@ -48,12 +52,12 @@ defaults = {
 
 # Local data storage for program data and game profile list
 
-APPDATA = os.environ['APPDATA']
+APPDATA = os.environ.get('APPDATA') or os.path.expanduser('~/Library/Application Support')  # Windows or macOS
 
 print ("APPDATA: ", APPDATA)
 
-settings_file = APPDATA + "\\QMP_3_settings.repr"
-old_settings_file = APPDATA + "\\quadstick_settings.repr"
+settings_file = os.path.join(APPDATA, "QMP_3_settings.repr")
+old_settings_file = os.path.join(APPDATA, "quadstick_settings.repr")
 settings = dict()
 
 print("INITIALIZE QSFLASH SETTINGS")
@@ -93,12 +97,28 @@ def save_repr_file(settings):
     f.flush()
     f.close()
 
+def flush_quadstick_drive():
+    """Push pending writes out to the QuadStick so it is safe to unplug or reboot.
+
+    Windows writes removable drives through as it goes; macOS holds changes in its cache."""
+    if hasattr(os, 'sync'):
+        os.sync()
+
 QuadStickDrive = None
 def find_quadstick_drive(force=None):
     #return None # for testing serial port functions
     global QuadStickDrive
     if force: QuadStickDrive = None  # force new search for drive
     if QuadStickDrive: return QuadStickDrive
+    if sys.platform != 'win32':
+        # macOS mounts the drive under its volume name, or "QUAD STICK 1" if a stale mount point is in the way
+        for name in os.listdir('/Volumes'):
+            d = '/Volumes/' + name + '/'  # ends in a separator like "E:\\" so callers can append a file name
+            if name.lower().startswith("quad stick") and os.path.ismount(d[:-1]):
+                print("QuadStick drive: ", d)
+                QuadStickDrive = d
+                return d
+        return None
     drives = win32api.GetLogicalDriveStrings()
     drives = drives.split('\000')[:-1]
     for d in drives:
@@ -209,6 +229,7 @@ def save_preferences_file(preferences):
             # cannot use percent sign in wxGlade source files
         csvfile.flush()
         os.fsync(csvfile.fileno())
+    flush_quadstick_drive()
     return True
 
 def save_csv_file(name, text):
@@ -226,6 +247,7 @@ def save_csv_file(name, text):
         csvfile.write(text)
         csvfile.flush()
         os.fsync(csvfile.fileno())
+    flush_quadstick_drive()
     return True
 
 def list_quadstick_csv_files(mainWindow, fast=False):  # quadstick flash drive
@@ -239,7 +261,7 @@ def list_quadstick_csv_files(mainWindow, fast=False):  # quadstick flash drive
     print ('quadstick drive letter ', repr(d))
     for (paths, dirs, file_names) in os.walk(d):
         break #first level directory only is what we want
-    csv_files = [n for n in file_names if (n.lower().find(".csv") > 0)] # only want .csv
+    csv_files = [n for n in file_names if (n.lower().find(".csv") > 0) and not n.startswith(".")] # only want .csv, not the "._x.csv" files macOS adds
     file_list = []
     #move default and prefs to front
     if "prefs.csv" in csv_files:
@@ -279,6 +301,38 @@ def list_quadstick_csv_files(mainWindow, fast=False):  # quadstick flash drive
         mainWindow._csv_files.append({"id":id, "name":spreadsheet_name,"csv_name":name})
     return answer
 
+_admin_prompt_declined = set()  # volumes whose administrator prompt was cancelled; do not ask again this run
+_FAT_SERIAL = slice(39, 43)  # where a FAT12/16 boot sector keeps the volume serial number
+
+def _mac_volume_serial(d):
+    """The four FAT volume serial number bytes of the QuadStick drive.
+
+    Reading the raw disk needs an administrator on macOS, so the answer is remembered
+    per volume UUID.  macOS derives that UUID from the serial number, so it changes
+    whenever the firmware (and with it the serial number) does."""
+    info = plistlib.loads(subprocess.check_output(['diskutil', 'info', '-plist', d]))
+    uuid = info.get('VolumeUUID')
+    known = settings.setdefault('volume_serials', {})
+    if uuid not in known:
+        device = '/dev/r' + info['DeviceIdentifier']
+        try:
+            with open(device, 'rb') as f:
+                sector = f.read(512)
+        except PermissionError:
+            if uuid in _admin_prompt_declined: raise
+            script = ('do shell script "/bin/dd if=' + device + ' bs=512 count=1 2>/dev/null | /usr/bin/xxd -p" '
+                      'with prompt "QuadStick Manager needs to read the firmware version from the QuadStick." '
+                      'with administrator privileges')
+            try:
+                sector = bytes.fromhex(subprocess.check_output(['osascript', '-e', script]).decode())
+            except subprocess.CalledProcessError:
+                _admin_prompt_declined.add(uuid)
+                raise
+        if not uuid:
+            return sector[_FAT_SERIAL]
+        known[uuid] = sector[_FAT_SERIAL].hex()
+    return bytes.fromhex(known[uuid])
+
 def quadstick_drive_serial_number(mainWindow):
     # read boot sector from quadstick and pull out build number from serial number
     d = find_quadstick_drive()
@@ -296,8 +350,11 @@ def quadstick_drive_serial_number(mainWindow):
                     return int(build.strip())
         return None
     try:
-        drive = os.open('\\\\.\\' + d[:2], os.O_RDONLY | os.O_BINARY)
-        tmp = os.read(drive, 512) # read boot sector 
+        if sys.platform == 'win32':
+            drive = os.open('\\\\.\\' + d[:2], os.O_RDONLY | os.O_BINARY)
+            tmp = os.read(drive, 512) # read boot sector 
+        else:
+            tmp = bytes(_FAT_SERIAL.start) + _mac_volume_serial(d)  # same offsets as in the boot sector
         #print (repr(tmp))
         #print tmp
         build = tmp[40] * 256 + tmp[39] #drive.read(2) # serial number

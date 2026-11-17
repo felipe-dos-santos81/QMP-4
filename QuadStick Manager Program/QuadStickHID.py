@@ -1,4 +1,5 @@
-from pywinusb import hid
+import hidcompat as hid
+import wx
 import traceback
 import sys
 import copy
@@ -135,6 +136,9 @@ class QuadStickHID(object):
                 print("send_feature_report retry failed")
             
     def update_display(self, data):
+        if not wx.IsMainThread():  # called from the UltraStik reader thread; widgets belong to the GUI thread
+            wx.CallAfter(self.update_display, list(data))
+            return
         try: # to update the display on the External Pointer tab
             if data[0] < 128: # positive value, moving to the Right
                 self.mainWindow.TIR_LeftRight.SetValue(data[0])

@@ -1,0 +1,8 @@
+wxPython==4.3.2
+hidapi==0.15.0
+pyserial==3.5
+openpyxl==3.1.5
+pyrfc6266==1.0.2
+pyinstaller==6.22.3
+pillow==13.0.0
+certifi>=2026.10.23

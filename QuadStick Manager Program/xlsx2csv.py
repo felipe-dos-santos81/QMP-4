@@ -16,6 +16,7 @@ import shutil
 from openpyxl import load_workbook
 import pyrfc6266
 import time
+import qsflash
 
 def get_google_doc_from_id(id):
     try: # to get published spreadsheet
@@ -81,8 +82,8 @@ def get_name_from_csv(f,d):
     return ""
 
 def write_temporary_file(name, contents, delete_old=True):
-    tmp_folder_path = tempfile.gettempdir() + '\\quad_stick_temporary_files'
-    tmp_file_path = tmp_folder_path + "\\" + name
+    tmp_folder_path = os.path.join(tempfile.gettempdir(), 'quad_stick_temporary_files')
+    tmp_file_path = os.path.join(tmp_folder_path, name)
     if delete_old:
         shutil.rmtree(tmp_folder_path, True)  # clear out any old files from before
         time.sleep(2)
@@ -170,6 +171,7 @@ def write_csv_file_for(id, drive=None, QMP=None):
             csv_file.write("\n".join(lines)) # blank line separates sheets in csv file
             csv_file.flush()
             os.fsync(csv_file.fileno())
+        qsflash.flush_quadstick_drive()
     else: # try serial port
         from microterm import microterm
         mt = microterm()

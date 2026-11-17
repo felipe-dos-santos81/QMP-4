@@ -1,6 +1,5 @@
 #pyinstaller --onefile --console quadstickHID.spec
 
-from pywinusb import hid
 import traceback
 import sys
 import copy

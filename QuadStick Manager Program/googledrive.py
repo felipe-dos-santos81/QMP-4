@@ -77,11 +77,14 @@ def get_firmware_versions():
 # Check for update to this program
 def check_for_newer_version(mainWindow):
     # put this on a separate thread so the program becomes responsive if the urlopen takes a long time
-    t = threading.Thread(target=_check_for_newer_version, args=(mainWindow,))
+    build = mainWindow.build_number_text.GetValue()
+    t = threading.Thread(target=_check_for_newer_version, args=(mainWindow, build))
     t.daemon = True
     t.start()
 
-def _check_for_newer_version(mainWindow):
+def _check_for_newer_version(mainWindow, build):
+    # worker thread: downloads only.  Dialogs and widgets belong to the GUI thread.
+    builds = None
     try:
         print("check for newer QMP version")
         try:
@@ -89,9 +92,24 @@ def _check_for_newer_version(mainWindow):
         except:
             f = urllib.request.urlopen(version_url, None, 5.0)
         version = f.read().decode()
+    except Exception as e:
+        print("check_for_newer_version download exception " + repr(e))
+        print(traceback.format_exc())
+        return
+    if build != 'None':  # no point if checking if not plugged in
+        try:
+            print("check firmware version")
+            builds = get_firmware_versions()
+        except Exception as e:
+            print("check for newer firmware exception " + repr(e))
+            print(traceback.format_exc())
+    wx.CallAfter(_report_newer_version, mainWindow, build, version, builds)
+
+def _report_newer_version(mainWindow, build, version, builds):
+    try:
         print("version: ", version, VERSION)
         if version > VERSION:
-            wx.CallAfter(mainWindow.text_ctrl_messages.AppendText, "A newer version of this program is available at QuadStick.com\r\nVisit http://quadstick.com/downloads\r\n") 
+            mainWindow.text_ctrl_messages.AppendText("A newer version of this program is available at QuadStick.com\r\nVisit http://quadstick.com/downloads\r\n")
             
             # if it has been more than a week since the last time we asked
             print("last time declined qmp update ", qsflash.settings.get("declined_qmp_update", 0))
@@ -109,23 +127,20 @@ def _check_for_newer_version(mainWindow):
                 return # don't inflict two dialog boxes on them
 
         print("latest version is: ", version)
-        build = mainWindow.build_number_text.GetValue()
         telemetry_log('start&version=' + VERSION + '&firmware=' + build)
     except Exception as e:
         print("check_for_newer_version exception " + repr(e))
         print(traceback.format_exc())
     # check for firmware update
-    if build == 'None':  # no point if checking if not plugged in
+    if builds is None:
         return
     try:
-        print("check firmware version")
-        builds = get_firmware_versions()
         for bld in builds:
             b = int(bld.get("version",0))
             if b > int(build):
                 if "TEST" in bld.get("comment"):
                     continue
-                wx.CallAfter(mainWindow.text_ctrl_messages.AppendText, "A newer version of the firmware is available. Please update.\r\n") 
+                mainWindow.text_ctrl_messages.AppendText("A newer version of the firmware is available. Please update.\r\n")
                 print("last time declined firmware update ", qsflash.settings.get("declined_firmware_update", 0))
                 if (time.time() > (qsflash.settings.get("declined_firmware_update", 0) + (86400 * 7))):
                     confirm = wx.MessageDialog( mainWindow, "Please install the new firmware update.", caption="Firmware Update available", style=wx.OK | wx.STAY_ON_TOP )

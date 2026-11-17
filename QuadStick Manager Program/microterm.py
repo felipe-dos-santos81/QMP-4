@@ -12,8 +12,14 @@ from qsflash import settings, save_repr_file
 ## create a serial connection to the quadstick to relay voice commands
 RCV_TIMEOUT = 3.0
 
+def candidate_ports():
+    # every Mac has these two: the system's debug console and its own incoming Bluetooth
+    # service.  A paired QuadStick gets a port of its own, named after the device.
+    builtin = ('/dev/cu.debug-console', '/dev/cu.Bluetooth-Incoming-Port')
+    return [p for p in list_ports.comports() if p[0] not in builtin]
+
 def has_serial_ports(): # return true if serial ports exist
-    ports = list(list_ports.comports())
+    ports = candidate_ports()
     print("Serial ports: ", repr(ports))
     return len(ports) > 0
     
@@ -92,7 +98,7 @@ class _Microterm(object):
     def find_quadstick_serial_port(self):
         #print("find serial connection to quadstick")
         # @todo: remember for next time
-        ports = list(list_ports.comports())
+        ports = candidate_ports()
         if not ports:
             return None
         port_names = [x[0] for x in ports]

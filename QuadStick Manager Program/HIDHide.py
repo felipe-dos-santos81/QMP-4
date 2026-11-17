@@ -1,4 +1,3 @@
-import winreg
 import subprocess
 # from pywinusb import hid
 # import traceback
@@ -31,6 +30,7 @@ class HIDHide(object):
         if mainWindow:
             self._log = mainWindow.text_ctrl_messages.AppendText
         try:
+            import winreg  # Windows only, like HidHide itself
             key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REG_PATH, 0, winreg.KEY_READ)
             self.H_path = winreg.QueryValueEx(key, 'Path')[0]
             print (self.H_path)  # 'C:\\Program Files\\Nefarius Software Solutions\\HidHide\\'

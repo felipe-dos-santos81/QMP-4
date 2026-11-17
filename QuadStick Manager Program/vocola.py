@@ -1,6 +1,6 @@
 ## Vocola related functions
-from win32com.shell import shell, shellcon
 import os
+import sys
 import threading
 import copy
 from microterm import microterm
@@ -13,8 +13,8 @@ UDP_IP = "127.0.0.1" #"0.0.0.0" #
 UDP_PORT = 47807
 
 
-USERPROFILE = os.environ['USERPROFILE']
 try:
+    from win32com.shell import shell, shellcon  # Windows only, like Vocola itself
     PERSONAL_FOLDER = shell.SHGetFolderPath(0, shellcon.CSIDL_PERSONAL, None, 0)
     VocolaFolder = "\\Natlink\\Vocola\\"
     VocolaPath = PERSONAL_FOLDER + VocolaFolder
@@ -108,10 +108,13 @@ def generate_includes_vch_file():
     #print "vocola game specific phrases: ", repr(VCH_file_words)
 
 # Bring window to front
-import win32gui
-import win32con
+if sys.platform == 'win32':
+    import win32gui
+    import win32con
 def BringToFront(HWND):
     print("BringToFront")
+    if sys.platform != 'win32':
+        return  # Raise(), which the callers also do, is all there is elsewhere
     win32gui.ShowWindow(HWND, win32con.SW_RESTORE)
     win32gui.SetWindowPos(HWND,win32con.HWND_NOTOPMOST, 0, 0, 0, 0, win32con.SWP_NOMOVE + win32con.SWP_NOSIZE)  
     win32gui.SetWindowPos(HWND,win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOMOVE + win32con.SWP_NOSIZE)  
@@ -143,19 +146,13 @@ class VocolaListenerThread(threading.Thread):
                 # check for special command strings
                 try:
                     data = data.decode()
+                    # windows may only be touched from the GUI thread, so hand these over to it
                     if data.find("BRING TO FRONT") >= 0:
-                        self._mainWindow.Raise()
-                        self._mainWindow.Show()
-                        self._mainWindow.Restore()
-                        #BringToFront(self._mainWindow.GetHandle())
-                        self._mainWindow.Raise()
+                        self._mainWindow.CallAfter(self._bring_to_front)
                         continue
                     if data.find("LOAD: ") >= 0:
                         qmp_url = data.split(": ")[1]
-                        self._mainWindow.Raise()
-                        BringToFront(self._mainWindow.GetHandle())
-                        self._mainWindow.CallAfter(self._mainWindow.csv_files_dropped, None, None, qmp_url)
-                        self._mainWindow.Raise()
+                        self._mainWindow.CallAfter(self._load_game_profile, qmp_url)
                         continue
                 except Exception as e:
                     print("Vocola thread: ", repr(e))
@@ -184,6 +181,19 @@ class VocolaListenerThread(threading.Thread):
             print(traceback.format_exc())
             print ("vocola thread exception.  Stopping\n")
                 
+    def _bring_to_front(self):
+        self._mainWindow.Raise()
+        self._mainWindow.Show()
+        self._mainWindow.Restore()
+        #BringToFront(self._mainWindow.GetHandle())
+        self._mainWindow.Raise()
+
+    def _load_game_profile(self, qmp_url):
+        self._mainWindow.Raise()
+        BringToFront(self._mainWindow.GetHandle())
+        self._mainWindow.csv_files_dropped(None, None, qmp_url)
+        self._mainWindow.Raise()
+
     def kill(self):
         self._alive = False
         try:
