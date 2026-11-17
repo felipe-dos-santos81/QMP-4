@@ -36,8 +36,9 @@ clean: ## Remove venv, build output, and all temporary files
 run: install ## Run QMP from source (usage: make run [debug=1])
 	$(PYTHON) QuadStick.py $(if $(debug),-debug)
 
-test: install ## Run the HID report descriptor self-check
+test: install ## Run the self-checks (HID report parser, build number recovery)
 	$(PYTHON) hidcompat.py
+	$(PYTHON) qsflash.py
 
 # ── Build ────────────────────────────────────────────────────────────────────
 

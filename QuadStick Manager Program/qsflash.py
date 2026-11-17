@@ -3,8 +3,12 @@
 import os
 import sys
 import csv
+import hashlib
 import plistlib
+import struct
 import subprocess
+import threading
+import uuid
 import wx
 if sys.platform == 'win32':
     import win32api
@@ -301,37 +305,64 @@ def list_quadstick_csv_files(mainWindow, fast=False):  # quadstick flash drive
         mainWindow._csv_files.append({"id":id, "name":spreadsheet_name,"csv_name":name})
     return answer
 
-_admin_prompt_declined = set()  # volumes whose administrator prompt was cancelled; do not ask again this run
-_FAT_SERIAL = slice(39, 43)  # where a FAT12/16 boot sector keeps the volume serial number
+_FS_UUID_NAMESPACE = uuid.UUID('B3E20F39-F292-11D6-97A4-00306543ECAC').bytes  # Apple's kFSUUIDNamespaceSHA1
+_serial_searches = set()  # volume UUIDs already being searched, or searched without success, in this run
 
-def _mac_volume_serial(d):
+def _serial_from_uuid(volume_uuid, sectors, builds):
+    """Find the FAT volume serial number that macOS turned into volume_uuid, or None.
+
+    macOS gives a FAT volume the UUID MD5(namespace + serial number + sector count).  The
+    QuadStick keeps its firmware build in the low half of the serial number.  The high half
+    is unknown, so every value of it is tried for each candidate build (about 30 ms a build).
+    A match on the whole hash is the proof, so a wrong answer cannot come out of this."""
+    target = uuid.UUID(volume_uuid).bytes
+    base = hashlib.md5(_FS_UUID_NAMESPACE)
+    tails = [struct.pack('>H', high) + struct.pack('<I', sectors) for high in range(65536)]
+    for build in builds:
+        low = struct.pack('<H', build)
+        for tail in tails:
+            h = base.copy()
+            h.update(low + tail)
+            digest = h.digest()
+            # bytes 6 and 8 carry the UUID version and variant bits instead of the hash
+            if digest[:6] == target[:6] and digest[7] == target[7] and digest[9:] == target[9:]:
+                return low + tail[:2]
+    return None
+
+def _find_volume_serial(volume_uuid, sectors, mainWindow):  # worker thread
+    from googledrive import get_firmware_versions  # late import because googledrive imports from this module
+    try:
+        listed = sorted({int(b['version']) for b in get_firmware_versions()}, reverse=True)
+    except Exception as e:
+        print("no firmware list to find the build number with: ", repr(e))
+        _serial_searches.discard(volume_uuid)  # probably offline, try again next time
+        return
+    # the builds on offer first, then every older one, then the serial number of the oldest firmware
+    builds = listed + [b for b in range(listed[0], 0, -1) if b not in listed] + [30867]
+    serial = _serial_from_uuid(volume_uuid, sectors, builds)
+    if serial is None:
+        print("firmware build number not found for volume ", volume_uuid)
+        return
+    settings['volume_serials'][volume_uuid] = serial.hex()
+    wx.CallAfter(mainWindow.updateControls)  # show the build number now that it is known
+
+def _mac_volume_serial(d, mainWindow):
     """The four FAT volume serial number bytes of the QuadStick drive.
 
-    Reading the raw disk needs an administrator on macOS, so the answer is remembered
-    per volume UUID.  macOS derives that UUID from the serial number, so it changes
-    whenever the firmware (and with it the serial number) does."""
+    Windows reads them from the boot sector.  macOS does not let a user read the raw disk,
+    so they are worked out from the volume UUID instead, on a worker thread, and remembered
+    per UUID.  Until the answer is in, this raises and the build number shows as unknown."""
     info = plistlib.loads(subprocess.check_output(['diskutil', 'info', '-plist', d]))
-    uuid = info.get('VolumeUUID')
+    volume_uuid = info['VolumeUUID']
     known = settings.setdefault('volume_serials', {})
-    if uuid not in known:
-        device = '/dev/r' + info['DeviceIdentifier']
-        try:
-            with open(device, 'rb') as f:
-                sector = f.read(512)
-        except PermissionError:
-            if uuid in _admin_prompt_declined: raise
-            script = ('do shell script "/bin/dd if=' + device + ' bs=512 count=1 2>/dev/null | /usr/bin/xxd -p" '
-                      'with prompt "QuadStick Manager needs to read the firmware version from the QuadStick." '
-                      'with administrator privileges')
-            try:
-                sector = bytes.fromhex(subprocess.check_output(['osascript', '-e', script]).decode())
-            except subprocess.CalledProcessError:
-                _admin_prompt_declined.add(uuid)
-                raise
-        if not uuid:
-            return sector[_FAT_SERIAL]
-        known[uuid] = sector[_FAT_SERIAL].hex()
-    return bytes.fromhex(known[uuid])
+    if not known.get(volume_uuid):
+        if volume_uuid not in _serial_searches:
+            _serial_searches.add(volume_uuid)
+            t = threading.Thread(target=_find_volume_serial, args=(volume_uuid, info['Size'] // 512, mainWindow))
+            t.daemon = True
+            t.start()
+        raise LookupError('firmware build number not known yet')
+    return bytes.fromhex(known[volume_uuid])
 
 def quadstick_drive_serial_number(mainWindow):
     # read boot sector from quadstick and pull out build number from serial number
@@ -354,7 +385,7 @@ def quadstick_drive_serial_number(mainWindow):
             drive = os.open('\\\\.\\' + d[:2], os.O_RDONLY | os.O_BINARY)
             tmp = os.read(drive, 512) # read boot sector 
         else:
-            tmp = bytes(_FAT_SERIAL.start) + _mac_volume_serial(d)  # same offsets as in the boot sector
+            tmp = bytes(39) + _mac_volume_serial(d, mainWindow)  # serial number at its boot sector offset
         #print (repr(tmp))
         #print tmp
         build = tmp[40] * 256 + tmp[39] #drive.read(2) # serial number
@@ -369,3 +400,16 @@ def quadstick_drive_serial_number(mainWindow):
         print('Unable to read drive SN')
         return None
 
+
+def demo():
+    """Self-check for the build number recovery: python qsflash.py"""
+    # a FAT image made for testing: serial number bytes 8C 05 12 34 (build 1420), 4096 sectors
+    known_uuid = '5B5C8847-33D4-37A7-91BB-DF7FF44B76E0'
+    assert _serial_from_uuid(known_uuid, 4096, [1500, 1420]) == bytes([0x8C, 0x05, 0x12, 0x34])
+    assert _serial_from_uuid(known_uuid, 4096, [1419, 1421]) is None
+    assert _serial_from_uuid(known_uuid, 4095, [1420]) is None
+    print('qsflash ok')
+
+
+if __name__ == '__main__':
+    demo()

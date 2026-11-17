@@ -19,14 +19,14 @@ Needs Python 3.12 and `make`. From the `QuadStick Manager Program` folder:
 | `make install` | Create `.venv` and install `requirements-macos.txt` |
 | `make run` | Run QMP from source (`make run debug=1` for debug output) |
 | `make build` | Build `dist/QuadStick.app` |
-| `make test` | Run the HID self-check |
+| `make test` | Run the self-checks |
 | `make help` | List all targets |
 
 What differs from Windows:
 
 - The Windows-only features above are disabled. The Voice Control tab stays as the transcript for typed commands.
 - Settings live in `~/Library/Application Support/QMP_3_settings.repr`.
-- Reading the firmware build number needs an administrator password. QMP asks once per firmware version and remembers the answer.
+- The firmware build number is worked out from the drive's volume ID a moment after start-up, with no password, and remembered per firmware version.
 - The built app is not signed with a Developer ID or notarized.
 
 ## Windows
